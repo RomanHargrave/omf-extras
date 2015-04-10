@@ -1,2 +1,2 @@
 #!/usr/bin/fish
-source (dirname (status -f)/require.fish)
+source (dirname (status -f))/require.fish
