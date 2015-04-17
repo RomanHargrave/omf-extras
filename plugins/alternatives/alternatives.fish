@@ -1,0 +1,337 @@
+#!/usr/bin/env fish
+# vim: set ft=fish :
+#
+# Better update-alternatives
+require getopts
+set     scr_root                (dirname (status -f))
+set     __fs                    '\x1F'  # ASCII FS
+set     __fs_raw                \x1F
+set     __rs                    '\x1E'  # ASCII RS
+set     __rs_raw                \x1E
+set     __alt_default_priority  100     # High
+  
+function __columnate
+    set __delim     $argv[1]; set -e argv[1]
+    if not count $argv > /dev/null
+        read -az argv
+    end
+    set __maxlen    (printf '%s\n' $argv | wc -L)
+    set __cols      (math (tput cols) / $__maxlen | xargs printf '%d')
+    
+    for n in (seq $__cols)
+        printf '- '
+    end | read __paste
+
+    printf '%s\n' $argv | eval "paste -d '|' $__paste" | column -s '|' -t -n 
+end
+
+function __collapse_long_spaces -a delim
+    if not set -ql delim
+        set -l delim " "
+    end
+
+    sed -r 's/\s+/'$delim'/g'
+end
+
+function __to_array
+    sed 's/'$__fs'/\n/g'
+end
+
+function __alt_get_selections_map
+    # Avoid touching things in the path
+    update-alternatives --get-selections\
+    | gawk 'match($0, /(^.+)\s+(auto|manual)\s*(.+$)/, gr) { print gr[1]"'$__fs'"gr[2]"'$__fs'"gr[3] }'\
+    | sed -r 's/\s+'$__fs'/'$__fs'/g'
+end
+
+function __all_alternatives
+    __alt_get_selections_map | awk 'BEGIN { FS="'$__fs'" } { print $1 }'
+end
+
+function __list_all_alternatives
+    set_color green
+    for selection in (__alt_get_selections_map) 
+
+        set selection   (echo $selection | __to_array)
+        set __name      $selection[1]
+        set __mode      $selection[2]
+
+        echo $__name
+
+    end | __columnate
+    set_color normal
+end
+
+function __list_providers_for -a alternative
+    update-alternatives --list $alternative | xargs -I @ realpath @
+end
+
+function __get_link -a alternative
+    update-alternatives --query $alternative | head -n2 | grep -Po '(?<=Link: ).*$'
+end
+
+function __show_alternative --wraps='update-alternatives --query'
+    for alternative in $argv
+        set __line  (__alt_get_selections_map | grep "^$alternative" | head -n1 | __to_array)
+        set name    $__line[1]
+        set mode    $__line[2]
+        set current (realpath $__line[3])
+        set link    (__get_link $alternative)
+        set alts    (__list_providers_for $alternative)
+
+        begin
+            printf "Alternative: "
+            set_color green
+            echo "$name ($link)"
+            if [ $mode -eq auto ]
+                set_color --underline
+            end
+            echo "  Provided by $current in $mode mode"
+            set_color normal
+            if count $alts > /dev/null
+                echo "  Alternatives:"
+                printf "    %s\n" $alts
+            end
+        end
+    end
+end
+
+function __locate_dir
+    set dir_name $argv[1]; set -e argv[1]
+    if which mlocate > /dev/null
+        mlocate --regex "^"$argv".*?/$dir_name\$" | begin
+            read -l __dir
+            test -d $__dir
+            and echo $__dir
+        end
+    else
+        find $argv -type d -name "$dir_name"
+    end
+end
+
+function __alts_default_admin_dir
+    __locate_dir alternatives /var/lib | head -n1
+end
+
+function __alts_default_alt_dir
+    __locate_dir alternatives /etc | head -n1
+end
+
+function __alt_elevated
+    # Helper to handle tasks that may require elevated privileges depending on the paramters passed
+    # to update-alternatives
+
+    set __alt_dir       (__alts_default_admin_dir)
+    set __admin_dir     (__alts_default_alt_dir)
+    set __alt_command   "update-alternatives $argv"
+
+    # Check for altdir and admindir
+    while set param (getopts "altdir: admindir:" $argv)
+        switch $param[1]
+            case 'altdir'
+                set __alt_dir $param[2]
+            case 'admindir'
+                set __admin_dir $param[2]
+        end
+    end
+
+    if not [ -O $__alt_dir -a -O $__admin_dir ]
+        set __elevation_command
+        
+        if which sudo > /dev/null
+            set __elevation_command sudo
+        else if which pkexec > /dev/null
+            set __elevation_command pkexec
+        else
+            set_color red
+            echo "Neither sudo nor pkexec are available"
+            set_color normal
+            return 1
+        end
+
+        set __alt_command "$__elevation_command $__alt_command"
+    end
+
+    eval $__alt_command
+end
+
+function __alt_get_names_links
+    for name in (__all_alternatives)
+        echo "$name$__fs_raw"(__get_link $name)
+    end 
+end
+
+function __install_alternative
+    set alt_name        $argv[1]; set -e argv[1]
+    set alt_path        $argv[1]; set -e argv[1]
+
+    set alt_priority    $__alt_default_priority
+    set alt_link        (__get_link $alt_name)
+
+    set slaves          
+
+    while set option (getopts 'p:priority:^ l:link:^ s:slave:^ h:help:^')
+        switch $option[1]
+            case p priority
+                set alt_priority $option[2]
+            case l link
+                set alt_link $option[2]
+            case s slave
+                set slaves $slaves $option[2]
+            case h help
+                echo "Usage: [-pV|--priority=V] [-l/path/to|--link=/path/to] [-h|--help]"
+                return 0
+        end
+    end
+
+    if not count $alt_link > /dev/null
+        set_color red
+        echo "The alternative $alt_name has no link. Please specify one with --link=path"
+        set_color normal
+        return 1
+    end
+
+    __alt_elevated --install $alt_link $alt_name $alt_path $alt_priority "--slave "$slaves
+        
+end
+
+function __search_alternatives
+    set index   (__all_alternatives)
+    set links   (__alt_get_names_links)
+    set data    (__alt_get_selections_map)
+
+    set names   
+    for term in $argv
+        set found_names
+        if echo $term | grep -Piq '(link|mode|current|provider):'
+            set handle      (echo $term | cut -d : -f1)
+            set criteria    (echo $term | cut -d : -f2-)
+            switch $handle
+                case link
+                    for link_pair in $links
+                        set link (echo $link_pair | __to_array)
+                        if echo $link[2] | grep -Piq "$criteria"
+                            set found_names $found_names $link[1]
+                        end
+                    end
+                case mode
+                    for datum in $data
+                        set alt (echo $datum | __to_array)
+                        if echo $alt[2] | grep -Piq "$criteria"
+                            set found_names $found_names $alt[1]
+                        end
+                    end
+                case current # Alt path
+                    for datum in $data
+                        set alt (echo $datum | __to_array)
+                        if echo $alt[3] | grep -Piq "$criteria"
+                            set found_names $found_names $alt[1]
+                        end
+                    end
+                case provider # Criteria matches available alternative
+                    for alt_name in $index
+                        if __list_providers_for $alt_name | grep -Piq "$criteria"
+                            set found_names $found_names $alt_name
+                        end
+                    end
+            end
+        else
+            set found_names (printf '%s\n' $index | grep -Pi $term)
+        end
+        if count $found_names > /dev/null
+            set names $names $found_names
+        end
+    end
+
+    __show_alternative $names
+end
+
+function __disambiguate_path -a alternative path
+    if not [ -e $path ]
+        set candidates (__list_providers_for $alternative | grep -i $path)
+        if [ (count $candidates) -gt 1 ]
+            set_color red
+            echo "More than one providers for $alternative match $path:"
+            printf '    %s\n' $candidates
+            set_color normal
+            return 1
+        else
+            set path $candidates
+        end
+    else
+        set path (realpath $path)
+    end
+
+    echo $path
+end
+
+function __set_alternative -a alternative path
+
+    # Try to disambiguate the path if it's not an actual file
+    if set path (__disambiguate_path $alternative $path)
+
+        if not contains -- $path (__list_providers_for $alternative)
+            echo "$path will be installed as an alternative to $alternative"
+            if not __install_alternative $alternative $path
+                set_color red
+                echo "Could not install $path"
+                set_color normal
+            end
+        end
+
+        __alt_elevated --set $alternative $path
+
+    else
+
+        set_color red
+        echo "Unable to figure out $alternative and $path"
+        echo "Is $alternative installed?"
+        set_color normal 
+        return 1
+
+    end
+end
+
+function __rm_alternative -a alternative path
+
+    if set path (__disambiguate_path $alternative $path)
+
+        if contains -- $path (__list_providers_for $alternative)
+            __alt_elevated --remove $alternative $path
+        else
+            set_color red
+            echo "$path is not a provider for $alternative"
+            set_color normal
+            return 1
+        end
+
+    else
+
+        set_color red
+        echo "Unable to figure out $alternative and $path"
+        echo "Is $alternative installed?"
+        set_color normal 
+        return 1
+
+    end
+
+end
+
+function alternatives
+
+    set action $argv[1]; set -e argv[1]
+    switch $action
+        case l list
+            __list_all_alternatives $argv
+        case s show
+            __show_alternative $argv
+        case f find search
+            __search_alternatives $argv
+        case c set
+            __set_alternative $argv
+        case i install
+            __install_alternative $argv
+        case d del rm remove delete
+            __rm_alternative $argv
+    end
+end
