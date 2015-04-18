@@ -335,3 +335,5 @@ function alternatives
             __rm_alternative $argv
     end
 end
+
+alternatives $argv
