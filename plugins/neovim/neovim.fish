@@ -1,9 +1,12 @@
+function __neovim_disambiguate_paths
+    printf '%s\n' $argv | xargs -n1 realpath
+end
 
 # Only enable this functionality if NVIM_LISTEN_ADDRESS is defined
 function __neovim_define_helpers
 
     function nvim
-        nvimex badd $argv
+        nvimex tabnew (__neovim_disambiguate_paths $argv)
     end
 
     alias   vim     nvim
@@ -12,26 +15,26 @@ function __neovim_define_helpers
 
     function vimdiff
         if [ (count $argv) -eq 2 ]
-            nvimex diff $argv
+            nvimex diff (__neovim_disambiguate_paths $argv)
         else
             echo "2 Arguments Required"
         end
     end
 
     function edit
-        nvimex edit $argv
+        nvimex edit (__neovim_disambiguate_paths $argv)
     end
 
     alias   e   edit
 
     function vsplit
-        nvimex vsplit $argv
+        nvimex vsplit (__neovim_disambiguate_paths $argv)
     end
 
     alias   vs  vsplit
 
     function split
-        nvimex split $argv
+        nvimex split (__neovim_disambiguate_paths $argv)
     end
 
     alias   sp  split
