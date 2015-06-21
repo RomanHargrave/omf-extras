@@ -1,0 +1,6 @@
+#!/usr/bin/env fish
+begin
+    set loadfile_path (dirname (realpath (status -f)))
+    source $loadfile_path/ssh-agent.fish
+end
+
